@@ -15,6 +15,7 @@ export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const targetUrl = searchParams.get("url")?.trim();
   const refUrl = searchParams.get("ref")?.trim() || "https://playv2.sub3.top/";
+  const mediaCookie = searchParams.get("cookie")?.trim() || "";
   const isAudioOnly = searchParams.get("audio") === "1" || searchParams.get("audio") === "true";
 
   if (!targetUrl) {
@@ -47,6 +48,7 @@ export async function GET(request: NextRequest) {
         Origin: origin,
         Accept: "*/*",
         "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+        ...(mediaCookie ? { Cookie: mediaCookie } : {}),
       },
       cache: "no-store",
     });
