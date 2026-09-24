@@ -53,6 +53,11 @@ async function fetchM3u8(url: string, refUrl = "https://playv2.sub3.top/", cooki
 
     for (let attempt = 0; attempt < 2; attempt++) {
       const res = await fetch(url, { headers, cache: "no-store" });
+      console.info("[m3u8 fetch]", {
+        host: (() => { try { return new URL(url).host; } catch { return "invalid"; } })(),
+        refHost: (() => { try { return new URL(candidateRef).host; } catch { return "invalid"; } })(),
+        status: res.status,
+      });
       if (res.ok) {
         return { content: await res.text(), finalUrl: url };
       }
@@ -128,7 +133,7 @@ export async function GET(request: NextRequest) {
           : detail.sub_episodes;
         const targetEp = epList.find((e) => e.number === ep) || epList[0];
         if (targetEp && targetEp.watch_url) {
-          const streamInfo = await getEpisodeStream(targetEp.watch_url);
+          const streamInfo = await getEpisodeStream(targetEp.watch_url, true);
           if (streamInfo && streamInfo.m3u8_url) {
             m3u8Url = streamInfo.m3u8_url;
             // 실제 m3u8을 발급한 플레이어 URL을 Referer/Origin으로 유지
