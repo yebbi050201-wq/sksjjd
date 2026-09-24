@@ -612,13 +612,16 @@ export async function getEpisodeStream(watchUrl: string, forceRefresh = false): 
         }
 
         // 플레이어가 알려준 m3u8이 실제로 서버에서 접근 가능한지 확인한다.
-        const m3u8Origin = new URL(m3u8Url).origin;
+        const playerOrigin = new URL(candidateUrl).origin;
         const probeHeaders = {
           "User-Agent": LINKKF_HEADERS["User-Agent"],
           Referer: candidateUrl,
-          Origin: m3u8Origin,
+          Origin: playerOrigin,
           Accept: "*/*",
           "Accept-Language": LINKKF_HEADERS["Accept-Language"],
+          "Sec-Fetch-Site": "cross-site",
+          "Sec-Fetch-Mode": "cors",
+          "Sec-Fetch-Dest": "empty",
           ...(mediaCookie ? { Cookie: mediaCookie } : {}),
         };
         const probe = await fetch(m3u8Url, { headers: probeHeaders, cache: "no-store" });
