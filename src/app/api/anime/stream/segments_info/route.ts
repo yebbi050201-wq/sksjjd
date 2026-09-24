@@ -25,24 +25,40 @@ async function fetchM3u8(url: string, refUrl = "https://playv2.sub3.top/"): Prom
     }
   })();
 
-  const headers = {
-    "User-Agent":
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    Referer: refUrl,
-    Origin: origin,
-    Accept: "*/*",
-    "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
-  };
+  const refCandidates = [
+    refUrl,
+    (() => {
+      try { return new URL(url).origin + "/"; } catch { return refUrl; }
+    })(),
+    "https://playv2.sub3.top/",
+  ].filter((v, i, a) => v && a.indexOf(v) === i);
 
   let lastStatus = 0;
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const res = await fetch(url, { headers, cache: "no-store" });
-    if (res.ok) {
-      return { content: await res.text(), finalUrl: url };
+  for (const candidateRef of refCandidates) {
+    let candidateOrigin = origin;
+    try { candidateOrigin = new URL(candidateRef).origin; } catch {}
+
+    const headers = {
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+      Referer: candidateRef,
+      Origin: candidateOrigin,
+      Accept: "*/*",
+      "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+      "Sec-Fetch-Site": "cross-site",
+      "Sec-Fetch-Mode": "cors",
+      "Sec-Fetch-Dest": "empty",
+    };
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const res = await fetch(url, { headers, cache: "no-store" });
+      if (res.ok) {
+        return { content: await res.text(), finalUrl: url };
+      }
+      lastStatus = res.status;
+      if (res.status !== 403 && res.status !== 429 && res.status < 500) break;
+      await new Promise((resolve) => setTimeout(resolve, 350));
     }
-    lastStatus = res.status;
-    if (res.status !== 403 && res.status !== 429 && res.status < 500) break;
-    await new Promise((resolve) => setTimeout(resolve, 250));
   }
 
   throw new Error(`Failed to fetch m3u8: ${lastStatus}`);
