@@ -526,7 +526,7 @@ export async function getAnimeDetail(animeId: string): Promise<AnimeDetail | nul
   }
 }
 
-export async function getEpisodeStream(watchUrl: string, forceRefresh = false): Promise<EpisodeStreamInfo | null> {
+export async function getEpisodeStream(watchUrl: string, forceRefresh = false, probeM3u8 = true): Promise<EpisodeStreamInfo | null> {
   const cached = streamCache[watchUrl];
   if (!forceRefresh && cached && Date.now() - cached.timestamp < 1_800_000) {
     return cached.data;
@@ -624,13 +624,14 @@ export async function getEpisodeStream(watchUrl: string, forceRefresh = false): 
           "Sec-Fetch-Dest": "empty",
           ...(mediaCookie ? { Cookie: mediaCookie } : {}),
         };
-        const probe = await fetch(m3u8Url, { headers: probeHeaders, cache: "no-store" });
-        console.info("[Linkkf] m3u8 probe", {
-          host: (() => { try { return new URL(m3u8Url).host; } catch { return "invalid"; } })(),
-          status: probe.status,
-        });
-
-        if (!probe.ok) continue;
+        if (probeM3u8) {
+          const probe = await fetch(m3u8Url, { headers: probeHeaders, cache: "no-store" });
+          console.info("[Linkkf] m3u8 probe", {
+            host: (() => { try { return new URL(m3u8Url).host; } catch { return "invalid"; } })(),
+            status: probe.status,
+          });
+          if (!probe.ok) continue;
+        }
 
         let vttUrl = "";
         const vttMatch =
