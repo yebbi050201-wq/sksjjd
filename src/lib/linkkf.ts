@@ -102,6 +102,7 @@ export interface EpisodeStreamInfo {
   m3u8_url: string;
   vtt_url: string;
   player_url: string;
+  media_cookie?: string;
   server_sources: ServerSource[];
   link_next: string;
   link_pre: string;
@@ -570,8 +571,11 @@ export async function getEpisodeStream(watchUrl: string): Promise<EpisodeStreamI
       Referer: watchUrl,
     };
 
-    const pRes = await fetch(actualPlayerUrl, { headers: playerHeaders });
+    const pRes = await fetch(actualPlayerUrl, { headers: playerHeaders, cache: "no-store" });
     const pHtml = await pRes.text();
+    const mediaCookie = typeof pRes.headers.getSetCookie === "function"
+      ? pRes.headers.getSetCookie().map((v) => v.split(";")[0]).join("; ")
+      : (pRes.headers.get("set-cookie") || "").split(/,(?=[^;]+=[^;]+)/).map((v) => v.split(";")[0].trim()).filter(Boolean).join("; ");
 
     let m3u8Url = "";
     const m3u8Match = pHtml.match(/(?:url|videoUrl)\s*:\s*["']([^"']+\.m3u8[^"']*)["']/) || pHtml.match(/["']([^"']+\.m3u8[^"']*)["']/);
@@ -606,6 +610,7 @@ export async function getEpisodeStream(watchUrl: string): Promise<EpisodeStreamI
       m3u8_url: m3u8Url,
       vtt_url: vttUrl,
       player_url: actualPlayerUrl,
+      media_cookie: mediaCookie || undefined,
       server_sources: serverSources,
       link_next: linkNext.startsWith("/") ? `${BASE_URL}${linkNext}` : linkNext,
       link_pre: linkPre.startsWith("/") ? `${BASE_URL}${linkPre}` : linkPre,
