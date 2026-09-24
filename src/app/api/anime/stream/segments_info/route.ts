@@ -15,20 +15,37 @@ interface SegmentItem {
 }
 
 async function fetchM3u8(url: string, refUrl = "https://playv2.sub3.top/"): Promise<{ content: string; finalUrl: string }> {
-  // 재귀적으로 따라가는 각 m3u8 URL도 SSRF 가드 통과 필수
   await assertSafeProxyUrl(url);
-  const res = await fetch(url, {
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-      Referer: refUrl,
-    },
-  });
-  if (!res.ok) {
-    throw new Error(`Failed to fetch m3u8: ${res.status}`);
+
+  const origin = (() => {
+    try {
+      return new URL(refUrl).origin;
+    } catch {
+      return "https://playv2.sub3.top";
+    }
+  })();
+
+  const headers = {
+    "User-Agent":
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    Referer: refUrl,
+    Origin: origin,
+    Accept: "*/*",
+    "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+  };
+
+  let lastStatus = 0;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const res = await fetch(url, { headers, cache: "no-store" });
+    if (res.ok) {
+      return { content: await res.text(), finalUrl: url };
+    }
+    lastStatus = res.status;
+    if (res.status !== 403 && res.status !== 429 && res.status < 500) break;
+    await new Promise((resolve) => setTimeout(resolve, 250));
   }
-  const content = await res.text();
-  return { content, finalUrl: url };
+
+  throw new Error(`Failed to fetch m3u8: ${lastStatus}`);
 }
 
 async function parseM3u8Recursive(url: string, refUrl = "https://playv2.sub3.top/"): Promise<SegmentItem[]> {
@@ -78,6 +95,7 @@ export async function GET(request: NextRequest) {
 
   const { searchParams } = new URL(request.url);
   let m3u8Url = searchParams.get("url")?.trim();
+  let m3u8RefUrl = searchParams.get("ref")?.trim() || "https://playv2.sub3.top/";
   const animeId = searchParams.get("anime_id")?.trim();
   const ep = parseInt(searchParams.get("ep") || "1", 10) || 1;
   const isDub = searchParams.get("dub") === "1";
@@ -95,6 +113,8 @@ export async function GET(request: NextRequest) {
           const streamInfo = await getEpisodeStream(targetEp.watch_url);
           if (streamInfo && streamInfo.m3u8_url) {
             m3u8Url = streamInfo.m3u8_url;
+            // 실제 m3u8을 발급한 플레이어 URL을 Referer/Origin으로 유지
+            m3u8RefUrl = streamInfo.player_url || targetEp.watch_url;
           }
         }
       }
@@ -125,7 +145,7 @@ export async function GET(request: NextRequest) {
       throw e;
     }
 
-    const segments = await parseM3u8Recursive(m3u8Url);
+    const segments = await parseM3u8Recursive(m3u8Url, m3u8RefUrl);
     if (segments.length === 0) {
       return NextResponse.json(
         { success: false, message: "No segments found in m3u8" },
@@ -142,8 +162,8 @@ export async function GET(request: NextRequest) {
       .map((s) => ({
         duration: s.duration,
         offset: s.offset,
-        url: s.url, // 브라우저 직접 다운로드 (Vercel 대역폭 0B)
-        proxyUrl: `/api/anime/stream/segment?url=${encodeURIComponent(s.url)}&audio=1`, // CORS 차단 시 폴백
+        url: s.url,
+        proxyUrl: `/api/anime/stream/segment?url=${encodeURIComponent(s.url)}&ref=${encodeURIComponent(m3u8RefUrl)}&audio=1`,
       }));
 
     // 2. 엔딩 세그먼트 (뒤 2.5분: max(0, totalDuration - 150) ~ totalDuration)
@@ -153,8 +173,8 @@ export async function GET(request: NextRequest) {
       .map((s) => ({
         duration: s.duration,
         offset: s.offset,
-        url: s.url, // 브라우저 직접 다운로드 (Vercel 대역폭 0B)
-        proxyUrl: `/api/anime/stream/segment?url=${encodeURIComponent(s.url)}&audio=1`, // CORS 차단 시 폴백
+        url: s.url,
+        proxyUrl: `/api/anime/stream/segment?url=${encodeURIComponent(s.url)}&ref=${encodeURIComponent(m3u8RefUrl)}&audio=1`,
       }));
 
     return NextResponse.json(
