@@ -14,7 +14,7 @@ interface SegmentItem {
   offset: number;
 }
 
-async function fetchM3u8(url: string, refUrl = "https://playv2.sub3.top/"): Promise<{ content: string; finalUrl: string }> {
+async function fetchM3u8(url: string, refUrl = "https://playv2.sub3.top/", cookie = ""): Promise<{ content: string; finalUrl: string }> {
   await assertSafeProxyUrl(url);
 
   const origin = (() => {
@@ -48,6 +48,7 @@ async function fetchM3u8(url: string, refUrl = "https://playv2.sub3.top/"): Prom
       "Sec-Fetch-Site": "cross-site",
       "Sec-Fetch-Mode": "cors",
       "Sec-Fetch-Dest": "empty",
+      ...(cookie ? { Cookie: cookie } : {}),
     };
 
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -64,8 +65,8 @@ async function fetchM3u8(url: string, refUrl = "https://playv2.sub3.top/"): Prom
   throw new Error(`Failed to fetch m3u8: ${lastStatus}`);
 }
 
-async function parseM3u8Recursive(url: string, refUrl = "https://playv2.sub3.top/"): Promise<SegmentItem[]> {
-  const { content, finalUrl } = await fetchM3u8(url, refUrl);
+async function parseM3u8Recursive(url: string, refUrl = "https://playv2.sub3.top/", cookie = ""): Promise<SegmentItem[]> {
+  const { content, finalUrl } = await fetchM3u8(url, refUrl, cookie);
 
   // 마스터 플레이리스트 처리
   if (content.includes("#EXT-X-STREAM-INF")) {
@@ -73,7 +74,7 @@ async function parseM3u8Recursive(url: string, refUrl = "https://playv2.sub3.top
     for (const line of lines) {
       if (!line.startsWith("#")) {
         const nextUrl = new URL(line, finalUrl).toString();
-        return parseM3u8Recursive(nextUrl, refUrl);
+        return parseM3u8Recursive(nextUrl, refUrl, cookie);
       }
     }
   }
@@ -112,6 +113,7 @@ export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   let m3u8Url = searchParams.get("url")?.trim();
   let m3u8RefUrl = searchParams.get("ref")?.trim() || "https://playv2.sub3.top/";
+  let mediaCookie = "";
   const animeId = searchParams.get("anime_id")?.trim();
   const ep = parseInt(searchParams.get("ep") || "1", 10) || 1;
   const isDub = searchParams.get("dub") === "1";
@@ -131,6 +133,7 @@ export async function GET(request: NextRequest) {
             m3u8Url = streamInfo.m3u8_url;
             // 실제 m3u8을 발급한 플레이어 URL을 Referer/Origin으로 유지
             m3u8RefUrl = streamInfo.player_url || targetEp.watch_url;
+            mediaCookie = streamInfo.media_cookie || "";
           }
         }
       }
@@ -161,7 +164,7 @@ export async function GET(request: NextRequest) {
       throw e;
     }
 
-    const segments = await parseM3u8Recursive(m3u8Url, m3u8RefUrl);
+    const segments = await parseM3u8Recursive(m3u8Url, m3u8RefUrl, mediaCookie);
     if (segments.length === 0) {
       return NextResponse.json(
         { success: false, message: "No segments found in m3u8" },
@@ -179,7 +182,7 @@ export async function GET(request: NextRequest) {
         duration: s.duration,
         offset: s.offset,
         url: s.url,
-        proxyUrl: `/api/anime/stream/segment?url=${encodeURIComponent(s.url)}&ref=${encodeURIComponent(m3u8RefUrl)}&audio=1`,
+        proxyUrl: `/api/anime/stream/segment?url=${encodeURIComponent(s.url)}&ref=${encodeURIComponent(m3u8RefUrl)}&audio=1&cookie=${encodeURIComponent(mediaCookie)}`,
       }));
 
     // 2. 엔딩 세그먼트 (뒤 2.5분: max(0, totalDuration - 150) ~ totalDuration)
