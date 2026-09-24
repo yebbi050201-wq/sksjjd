@@ -243,11 +243,19 @@ async function browserEpisodeSegments(
     `/api/anime/stream/browser_info?anime_id=${encodeURIComponent(animeId)}&ep=${ep}`,
     { cache: "no-store" }
   );
-  if (!infoRes.ok) throw new Error(`Browser stream info failed: ${infoRes.status}`);
+  if (!infoRes.ok) {
+    console.error("[Audio AI browser fallback] stream info HTTP error", infoRes.status);
+    throw new Error(`Browser stream info failed: ${infoRes.status}`);
+  }
   const info = await infoRes.json();
-  if (!info.success || !info.m3u8_url) throw new Error(info.message || "Browser m3u8 URL unavailable");
+  if (!info.success || !info.m3u8_url) {
+    console.error("[Audio AI browser fallback] invalid stream info", info);
+    throw new Error(info.message || "Browser m3u8 URL unavailable");
+  }
+  console.info("[Audio AI browser fallback] m3u8 URL received", new URL(info.m3u8_url).host);
 
   const segments = await parseBrowserM3u8(info.m3u8_url);
+  console.info("[Audio AI browser fallback] m3u8 parsed", { segments: segments.length });
   if (!segments.length) throw new Error("No segments in browser m3u8");
 
   const totalDuration = segments.reduce((sum, s) => sum + s.duration, 0);
@@ -735,7 +743,14 @@ export async function runAudioSkipPipeline(params: {
   }
   if (!curSegRes.ok || !curSegData?.success) {
     console.warn("[Audio AI] server segment lookup failed; trying browser m3u8 fallback");
-    const browserData = await browserEpisodeSegments(animeId, episodeNumber);
+    let browserData;
+    try {
+      browserData = await browserEpisodeSegments(animeId, episodeNumber);
+      console.info("[Audio AI browser fallback] current episode SUCCESS");
+    } catch (e) {
+      console.error("[Audio AI browser fallback] current episode FAILED", e);
+      throw e;
+    }
     curSegData = {
       success: true,
       totalDuration: browserData.totalDuration,
@@ -851,7 +866,14 @@ export async function runAudioSkipPipeline(params: {
   }
   if (!compSegRes.ok || !compSegData?.success) {
     console.warn("[Audio AI] comparison server segment lookup failed; trying browser m3u8 fallback");
-    const browserData = await browserEpisodeSegments(animeId, compEp);
+    let browserData;
+    try {
+      browserData = await browserEpisodeSegments(animeId, compEp);
+      console.info("[Audio AI browser fallback] comparison episode SUCCESS");
+    } catch (e) {
+      console.error("[Audio AI browser fallback] comparison episode FAILED", e);
+      throw e;
+    }
     compSegData = {
       success: true,
       totalDuration: browserData.totalDuration,
