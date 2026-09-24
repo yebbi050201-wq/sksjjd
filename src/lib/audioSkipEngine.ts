@@ -222,7 +222,7 @@ async function parseBrowserM3u8(url: string, depth = 0): Promise<BrowserSegment[
   for (const line of text.split(/\r?\n/)) {
     const trimmed = line.trim();
     if (trimmed.startsWith("#EXTINF:")) {
-      const m = trimmed.match(/[\\d.]+/);
+      const m = trimmed.match(/[\d.]+/);
       duration = m ? parseFloat(m[0]) : 0;
     } else if (trimmed && !trimmed.startsWith("#")) {
       const segmentUrl = new URL(trimmed, url).toString();
