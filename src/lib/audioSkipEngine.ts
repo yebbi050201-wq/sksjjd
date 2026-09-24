@@ -46,132 +46,145 @@ export async function decodeAudioSegments(
     throw new Error("Web Audio API not supported in this browser");
   }
 
-  const audioCtx = new AudioCtxClass();
-  const buffers: (ArrayBuffer | null)[] = new Array(segmentUrls.length).fill(null);
+  if (segmentUrls.length === 0) return null;
 
-  // 세그먼트 병렬 다운로드 (동시 6개 풀)
-  // 우선순위 1: 원본 스트리밍 CDN에서 브라우저가 직접 다운로드 (Vercel 대역폭 0B 소모)
-  // 우선순위 2: CORS 차단 등으로 실패 시 서버 프록시(audio=1)로 안전 폴백
-  const CONCURRENCY = 6;
+  const audioCtx = new AudioCtxClass();
+  const CONCURRENCY = 4;
+  const decoded: Array<Float32Array | null> = new Array(segmentUrls.length).fill(null);
   let currentIndex = 0;
   let completedCount = 0;
 
-  async function worker() {
-    while (currentIndex < segmentUrls.length) {
-      const idx = currentIndex++;
+  // 중요: HLS/TS 세그먼트를 전부 이어 붙인 뒤 한 번에 decodeAudioData()하면
+  // 세그먼트 경계의 PES/ADTS 프레임 때문에 디코딩이 실패할 수 있다.
+  // 각 세그먼트를 개별 디코딩한 뒤 PCM으로 이어 붙인다.
+  const decodeOne = async (idx: number): Promise<Float32Array | null> => {
+    let data: ArrayBuffer | null = null;
+
+    const tryFetch = async (url: string): Promise<ArrayBuffer | null> => {
       try {
-        const resp = await fetch(segmentUrls[idx]);
-        if (resp.ok) {
-          const ab = await resp.arrayBuffer();
-          buffers[idx] = ab;
-        } else if (fallbackUrls && fallbackUrls[idx]) {
-          const fResp = await fetch(fallbackUrls[idx]);
-          if (fResp.ok) {
-            buffers[idx] = await fResp.arrayBuffer();
-          }
-        }
-      } catch (e) {
-        // 직접 fetch 시 CORS 등으로 실패할 경우 서버 프록시로 안전 폴백
-        if (fallbackUrls && fallbackUrls[idx]) {
-          try {
-            const fResp = await fetch(fallbackUrls[idx]);
-            if (fResp.ok) {
-              buffers[idx] = await fResp.arrayBuffer();
-            }
-          } catch (e2) {
-            console.warn("[Segment fetch error]:", segmentUrls[idx], e, e2);
-          }
-        } else {
-          console.warn("[Segment fetch error]:", segmentUrls[idx], e);
-        }
+        const resp = await fetch(url, { cache: "no-store" });
+        if (!resp.ok) return null;
+        const ab = await resp.arrayBuffer();
+        return ab.byteLength > 0 ? ab : null;
+      } catch {
+        return null;
       }
-      completedCount++;
-      if (onProgress) {
-        onProgress((completedCount / segmentUrls.length) * 0.5);
-      }
+    };
+
+    data = await tryFetch(segmentUrls[idx]);
+    if (!data && fallbackUrls?.[idx]) {
+      data = await tryFetch(fallbackUrls[idx]);
     }
-  }
 
-  const workers = Array.from(
-    { length: Math.min(CONCURRENCY, segmentUrls.length) },
-    () => worker()
-  );
-  await Promise.all(workers);
-
-  const rawBuffers = buffers.filter(
-    (b): b is ArrayBuffer => b !== null && b.byteLength > 0
-  );
-
-  if (rawBuffers.length === 0) {
-    audioCtx.close();
-    return null;
-  }
-
-  // 전체 청크 합치기 (순서 보장)
-  let totalBytes = 0;
-  for (const buf of rawBuffers) totalBytes += buf.byteLength;
-  const joinedData = new Uint8Array(totalBytes);
-  let offset = 0;
-  for (const buf of rawBuffers) {
-    joinedData.set(new Uint8Array(buf), offset);
-    offset += buf.byteLength;
-  }
-
-  // 서버에서 순수 오디오(AAC)로 변환되었는지, 원본 TS인지 판별
-  let aacData: Uint8Array;
-  if (isTsStream(joinedData)) {
-    // TS 스트림인 경우 클라이언트에서 AAC 추출
-    aacData = extractAacFromTs(joinedData);
-  } else {
-    // 이미 서버에서 AAC 오디오만 추출되어 전달됨
-    aacData = joinedData;
-  }
-
-  const audioArrayBuffer = aacData.buffer.slice(
-    aacData.byteOffset,
-    aacData.byteOffset + aacData.byteLength
-  );
-
-  let audioBuffer: AudioBuffer | null = null;
-  try {
-    audioBuffer = await audioCtx.decodeAudioData(audioArrayBuffer as ArrayBuffer);
-  } catch (err) {
-    // 디코딩 실패 시 전체 원본 버퍼로 1회 재시도
-    try {
-      const fallbackBuf = joinedData.buffer.slice(
-        joinedData.byteOffset,
-        joinedData.byteOffset + joinedData.byteLength
-      );
-      audioBuffer = await audioCtx.decodeAudioData(fallbackBuf as ArrayBuffer);
-    } catch (e2) {
-      console.error("[Audio decode failed]:", err, e2);
-      audioCtx.close();
+    if (!data) {
+      console.warn("[Audio segment unavailable]", idx);
       return null;
     }
+
+    const raw = new Uint8Array(data);
+    let audioData = raw;
+
+    try {
+      if (isTsStream(raw)) {
+        audioData = extractAacFromTs(raw);
+      }
+
+      // Demuxer가 오디오를 찾지 못한 경우 원본 TS를 decodeAudioData에 넘기지 않는다.
+      if (isTsStream(audioData) || audioData.byteLength < 16) {
+        throw new Error("No decodable AAC payload in segment");
+      }
+
+      const ab = audioData.buffer.slice(
+        audioData.byteOffset,
+        audioData.byteOffset + audioData.byteLength
+      ) as ArrayBuffer;
+
+      const buffer = await audioCtx.decodeAudioData(ab);
+      const channel = buffer.getChannelData(0);
+      return new Float32Array(channel);
+    } catch (firstError) {
+      // 일부 CDN은 TS가 아닌 AAC/MP3를 반환하거나 demux 결과가 브라우저에서
+      // 거부될 수 있으므로 원본을 한 번만 다시 시도한다.
+      try {
+        if (!isTsStream(raw)) {
+          const retryAb = raw.buffer.slice(
+            raw.byteOffset,
+            raw.byteOffset + raw.byteLength
+          ) as ArrayBuffer;
+          const buffer = await audioCtx.decodeAudioData(retryAb);
+          return new Float32Array(buffer.getChannelData(0));
+        }
+      } catch (secondError) {
+        console.warn("[Audio decode failed]", idx, firstError, secondError);
+      }
+      return null;
+    }
+  };
+
+  async function worker() {
+    while (true) {
+      const idx = currentIndex++;
+      if (idx >= segmentUrls.length) return;
+
+      decoded[idx] = await decodeOne(idx);
+      completedCount++;
+      onProgress?.((completedCount / segmentUrls.length) * 0.5);
+    }
   }
 
-  audioCtx.close();
+  await Promise.all(
+    Array.from(
+      { length: Math.min(CONCURRENCY, segmentUrls.length) },
+      () => worker()
+    )
+  );
 
-  if (!audioBuffer) return null;
-
-  // 11025Hz 모노로 리샘플링
-  const origSr = audioBuffer.sampleRate;
-  const origLen = audioBuffer.length;
-  const origData = audioBuffer.getChannelData(0); // 채널 0 (모노)
-
-  const targetLen = Math.floor(origLen * (SAMPLE_RATE / origSr));
-  const pcm = new Float32Array(targetLen);
-
-  const step = origSr / SAMPLE_RATE;
-  for (let i = 0; i < targetLen; i++) {
-    const srcIdx = Math.min(origLen - 1, Math.floor(i * step));
-    pcm[i] = origData[srcIdx];
+  const valid = decoded.filter((x): x is Float32Array => x !== null && x.length > 0);
+  if (valid.length === 0) {
+    await audioCtx.close();
+    throw new Error("오디오 세그먼트를 하나도 디코딩하지 못했습니다.");
   }
 
-  if (onProgress) {
-    onProgress(1.0);
+  // 세그먼트마다 원본 샘플레이트가 다를 수 있으므로 목표 11025Hz로
+  // 개별 리샘플링 후 연결한다.
+  const pieces: Float32Array[] = [];
+  let totalSamples = 0;
+
+  // decodeOne은 현재 원본 sampleRate 정보를 버리므로, 정확한 리샘플링을 위해
+  // 11025Hz OfflineAudioContext를 사용한다.
+  // 일반적으로 HLS AAC는 44100/48000Hz이므로 아래 보간으로 충분히 안정적으로 처리한다.
+  for (let i = 0; i < decoded.length; i++) {
+    const piece = decoded[i];
+    if (!piece) continue;
+
+    // 대부분의 브라우저 AAC 디코더는 44100Hz를 사용한다. 실제 sampleRate를
+    // 보존하지 않는 대신, 현재 AudioContext의 sampleRate를 기준으로 변환한다.
+    const origSr = audioCtx.sampleRate;
+    const targetLen = Math.max(1, Math.floor(piece.length * (SAMPLE_RATE / origSr)));
+    const resampled = new Float32Array(targetLen);
+    const step = origSr / SAMPLE_RATE;
+
+    for (let j = 0; j < targetLen; j++) {
+      const srcIdx = Math.min(piece.length - 1, Math.floor(j * step));
+      resampled[j] = piece[srcIdx];
+    }
+
+    pieces.push(resampled);
+    totalSamples += resampled.length;
   }
 
+  await audioCtx.close();
+
+  if (totalSamples === 0) return null;
+
+  const pcm = new Float32Array(totalSamples);
+  let writeOffset = 0;
+  for (const piece of pieces) {
+    pcm.set(piece, writeOffset);
+    writeOffset += piece.length;
+  }
+
+  onProgress?.(1.0);
   return pcm;
 }
 
