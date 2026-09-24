@@ -189,6 +189,85 @@ export async function decodeAudioSegments(
 }
 
 // ==========================================
+// AI 분석용 브라우저 직접 m3u8 fallback
+// 서버(Vercel)에서 CDN이 403을 반환할 때만 사용한다.
+// ==========================================
+interface BrowserSegment {
+  duration: number;
+  url: string;
+  offset: number;
+}
+
+async function fetchBrowserM3u8(url: string): Promise<string> {
+  const res = await fetch(url, { cache: "no-store", mode: "cors" });
+  if (!res.ok) throw new Error(`Browser m3u8 fetch failed: ${res.status}`);
+  return res.text();
+}
+
+async function parseBrowserM3u8(url: string, depth = 0): Promise<BrowserSegment[]> {
+  if (depth > 3) throw new Error("Too many nested m3u8 playlists");
+
+  const text = await fetchBrowserM3u8(url);
+  if (text.includes("#EXT-X-STREAM-INF")) {
+    const lines = text.split(/\r?\n/).map((x) => x.trim()).filter(Boolean);
+    const child = lines.find((x) => !x.startsWith("#"));
+    if (!child) throw new Error("No media playlist in master m3u8");
+    return parseBrowserM3u8(new URL(child, url).toString(), depth + 1);
+  }
+
+  const segments: BrowserSegment[] = [];
+  let duration = 0;
+  let offset = 0;
+
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("#EXTINF:")) {
+      const m = trimmed.match(/[\\d.]+/);
+      duration = m ? parseFloat(m[0]) : 0;
+    } else if (trimmed && !trimmed.startsWith("#")) {
+      const segmentUrl = new URL(trimmed, url).toString();
+      segments.push({ duration, url: segmentUrl, offset });
+      offset += duration;
+      duration = 0;
+    }
+  }
+
+  return segments;
+}
+
+async function browserEpisodeSegments(
+  animeId: string,
+  ep: number
+): Promise<{ totalDuration: number; op: { startSec: number; segments: BrowserSegment[] }; ed: { startSec: number; segments: BrowserSegment[] } }> {
+  const infoRes = await fetch(
+    `/api/anime/stream/browser_info?anime_id=${encodeURIComponent(animeId)}&ep=${ep}`,
+    { cache: "no-store" }
+  );
+  if (!infoRes.ok) throw new Error(`Browser stream info failed: ${infoRes.status}`);
+  const info = await infoRes.json();
+  if (!info.success || !info.m3u8_url) throw new Error(info.message || "Browser m3u8 URL unavailable");
+
+  const segments = await parseBrowserM3u8(info.m3u8_url);
+  if (!segments.length) throw new Error("No segments in browser m3u8");
+
+  const totalDuration = segments.reduce((sum, s) => sum + s.duration, 0);
+  const opEnd = Math.min(totalDuration, OP_SEARCH_SEC);
+  const edStart = Math.max(0, totalDuration - ED_SEARCH_SEC);
+
+  return {
+    totalDuration,
+    op: {
+      startSec: 0,
+      segments: segments.filter((s) => s.offset < opEnd && s.offset + s.duration > 0),
+    },
+    ed: {
+      startSec: edStart,
+      segments: segments.filter((s) => s.offset + s.duration > edStart),
+    },
+  };
+}
+
+// ==========================================
 // 3. Fast Fourier Transform (FFT) & CENS 크로마 추출
 // ==========================================
 function fftRadix2(re: Float32Array, im: Float32Array) {
@@ -650,12 +729,19 @@ export async function runAudioSkipPipeline(params: {
   const curSegRes = await fetch(
     `/api/anime/stream/segments_info?url=${encodeURIComponent(currentM3u8Url)}&anime_id=${encodeURIComponent(animeId)}&ep=${episodeNumber}`
   );
-  if (!curSegRes.ok) {
-    throw new Error("Failed to fetch current episode segments");
+  let curSegData: any;
+  if (curSegRes.ok) {
+    curSegData = await curSegRes.json();
   }
-  const curSegData = await curSegRes.json();
-  if (!curSegData.success) {
-    throw new Error(curSegData.message || "Invalid segment data");
+  if (!curSegRes.ok || !curSegData?.success) {
+    console.warn("[Audio AI] server segment lookup failed; trying browser m3u8 fallback");
+    const browserData = await browserEpisodeSegments(animeId, episodeNumber);
+    curSegData = {
+      success: true,
+      totalDuration: browserData.totalDuration,
+      op: browserData.op,
+      ed: browserData.ed,
+    };
   }
 
   const detectedIntervals: SkipIntervalResult[] = [];
@@ -759,12 +845,19 @@ export async function runAudioSkipPipeline(params: {
   const compSegRes = await fetch(
     `/api/anime/stream/segments_info?anime_id=${encodeURIComponent(animeId)}&ep=${compEp}`
   );
-  if (!compSegRes.ok) {
-    throw new Error(`Failed to load comparison episode ${compEp} segments`);
+  let compSegData: any;
+  if (compSegRes.ok) {
+    compSegData = await compSegRes.json();
   }
-  const compSegData = await compSegRes.json();
-  if (!compSegData.success) {
-    throw new Error(compSegData.message || `No segments for ep ${compEp}`);
+  if (!compSegRes.ok || !compSegData?.success) {
+    console.warn("[Audio AI] comparison server segment lookup failed; trying browser m3u8 fallback");
+    const browserData = await browserEpisodeSegments(animeId, compEp);
+    compSegData = {
+      success: true,
+      totalDuration: browserData.totalDuration,
+      op: browserData.op,
+      ed: browserData.ed,
+    };
   }
 
   // =========================================================================
