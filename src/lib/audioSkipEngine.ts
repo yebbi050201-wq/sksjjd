@@ -86,7 +86,7 @@ export async function decodeAudioSegments(
 
     try {
       if (isTsStream(raw)) {
-        audioData = extractAacFromTs(raw);
+        audioData = new Uint8Array(extractAacFromTs(raw));
       }
 
       // Demuxer가 오디오를 찾지 못한 경우 원본 TS를 decodeAudioData에 넘기지 않는다.
