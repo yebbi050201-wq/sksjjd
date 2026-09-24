@@ -732,32 +732,20 @@ export async function runAudioSkipPipeline(params: {
     console.warn("[Pipeline Step 2 themes lookup warning]:", e);
   }
 
-  // 현재 회차 세그먼트 정보 가져오기 (앞 4분, 뒤 2.5분)
-  if (onProgress) onProgress({ step: "재생 세그먼트 정보 수집 중...", progress: 20 });
-  const curSegRes = await fetch(
-    `/api/anime/stream/segments_info?url=${encodeURIComponent(currentM3u8Url)}&anime_id=${encodeURIComponent(animeId)}&ep=${episodeNumber}`
-  );
-  let curSegData: any;
-  if (curSegRes.ok) {
-    curSegData = await curSegRes.json();
-  }
-  if (!curSegRes.ok || !curSegData?.success) {
-    console.warn("[Audio AI] server segment lookup failed; trying browser m3u8 fallback");
-    let browserData;
-    try {
-      browserData = await browserEpisodeSegments(animeId, episodeNumber);
-      console.info("[Audio AI browser fallback] current episode SUCCESS");
-    } catch (e) {
-      console.error("[Audio AI browser fallback] current episode FAILED", e);
-      throw e;
-    }
-    curSegData = {
-      success: true,
-      totalDuration: browserData.totalDuration,
-      op: browserData.op,
-      ed: browserData.ed,
-    };
-  }
+  // AI 분석은 서버의 segments_info를 사용하지 않고 브라우저에서 직접 m3u8을 읽는다.
+  // Vercel 서버 → CDN 경로는 403이 발생할 수 있으므로 분석 경로를 분리한다.
+  if (onProgress) onProgress({ step: "브라우저에서 오디오 세그먼트 정보 수집 중...", progress: 20 });
+  const browserData = await browserEpisodeSegments(animeId, episodeNumber);
+  const curSegData: any = {
+    success: true,
+    totalDuration: browserData.totalDuration,
+    op: browserData.op,
+    ed: browserData.ed,
+  };
+  console.info("[Audio AI browser] current episode segments ready", {
+    op: curSegData.op.segments.length,
+    ed: curSegData.ed.segments.length,
+  });
 
   const detectedIntervals: SkipIntervalResult[] = [];
 
@@ -856,31 +844,18 @@ export async function runAudioSkipPipeline(params: {
     });
   }
 
-  // 비교 대상 회차 세그먼트 정보 조회
-  const compSegRes = await fetch(
-    `/api/anime/stream/segments_info?anime_id=${encodeURIComponent(animeId)}&ep=${compEp}`
-  );
-  let compSegData: any;
-  if (compSegRes.ok) {
-    compSegData = await compSegRes.json();
-  }
-  if (!compSegRes.ok || !compSegData?.success) {
-    console.warn("[Audio AI] comparison server segment lookup failed; trying browser m3u8 fallback");
-    let browserData;
-    try {
-      browserData = await browserEpisodeSegments(animeId, compEp);
-      console.info("[Audio AI browser fallback] comparison episode SUCCESS");
-    } catch (e) {
-      console.error("[Audio AI browser fallback] comparison episode FAILED", e);
-      throw e;
-    }
-    compSegData = {
-      success: true,
-      totalDuration: browserData.totalDuration,
-      op: browserData.op,
-      ed: browserData.ed,
-    };
-  }
+  // 비교 회차도 서버 segments_info를 거치지 않고 브라우저에서 직접 분석용 m3u8을 읽는다.
+  const compBrowserData = await browserEpisodeSegments(animeId, compEp);
+  const compSegData: any = {
+    success: true,
+    totalDuration: compBrowserData.totalDuration,
+    op: compBrowserData.op,
+    ed: compBrowserData.ed,
+  };
+  console.info("[Audio AI browser] comparison episode segments ready", {
+    op: compSegData.op.segments.length,
+    ed: compSegData.ed.segments.length,
+  });
 
   // =========================================================================
   // ★ 중요: 1) 오프닝(OP) 완료 후 -> 2) 엔딩(ED) 순차 작업 (앞 4분, 뒤 2.5분)
