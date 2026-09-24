@@ -526,9 +526,9 @@ export async function getAnimeDetail(animeId: string): Promise<AnimeDetail | nul
   }
 }
 
-export async function getEpisodeStream(watchUrl: string): Promise<EpisodeStreamInfo | null> {
+export async function getEpisodeStream(watchUrl: string, forceRefresh = false): Promise<EpisodeStreamInfo | null> {
   const cached = streamCache[watchUrl];
-  if (cached && Date.now() - cached.timestamp < 1_800_000) {
+  if (!forceRefresh && cached && Date.now() - cached.timestamp < 1_800_000) {
     return cached.data;
   }
 
@@ -569,9 +569,15 @@ export async function getEpisodeStream(watchUrl: string): Promise<EpisodeStreamI
     const playerHeaders = {
       "User-Agent": LINKKF_HEADERS["User-Agent"],
       Referer: watchUrl,
+      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "Accept-Language": LINKKF_HEADERS["Accept-Language"],
     };
 
     const pRes = await fetch(actualPlayerUrl, { headers: playerHeaders, cache: "no-store" });
+    if (!pRes.ok) {
+      console.error("[Linkkf] player fetch failed:", pRes.status);
+      return null;
+    }
     const pHtml = await pRes.text();
     const mediaCookie = typeof pRes.headers.getSetCookie === "function"
       ? pRes.headers.getSetCookie().map((v) => v.split(";")[0]).join("; ")
