@@ -559,12 +559,13 @@ export async function getEpisodeStream(watchUrl: string, forceRefresh = false): 
       }
     });
 
-    let actualPlayerUrl = (playerData.actual_url as string) || "";
-    if (!actualPlayerUrl && serverSources.length > 0) {
-      actualPlayerUrl = serverSources[0].player_url;
-    }
+    const actualPlayerUrl = (playerData.actual_url as string) || "";
+    const playerCandidates = [
+      actualPlayerUrl,
+      ...serverSources.map((source) => source.player_url),
+    ].filter((url, index, arr) => url && arr.indexOf(url) === index);
 
-    if (!actualPlayerUrl) return null;
+    if (playerCandidates.length === 0) return null;
 
     const playerHeaders = {
       "User-Agent": LINKKF_HEADERS["User-Agent"],
@@ -573,61 +574,98 @@ export async function getEpisodeStream(watchUrl: string, forceRefresh = false): 
       "Accept-Language": LINKKF_HEADERS["Accept-Language"],
     };
 
-    const pRes = await fetch(actualPlayerUrl, { headers: playerHeaders, cache: "no-store" });
-    if (!pRes.ok) {
-      console.error("[Linkkf] player fetch failed:", pRes.status);
-      return null;
-    }
-    const pHtml = await pRes.text();
-    const mediaCookie = typeof pRes.headers.getSetCookie === "function"
-      ? pRes.headers.getSetCookie().map((v) => v.split(";")[0]).join("; ")
-      : (pRes.headers.get("set-cookie") || "").split(/,(?=[^;]+=[^;]+)/).map((v) => v.split(";")[0].trim()).filter(Boolean).join("; ");
+    let lastResult: EpisodeStreamInfo | null = null;
 
-    let m3u8Url = "";
-    const m3u8Match = pHtml.match(/(?:url|videoUrl)\s*:\s*["']([^"']+\.m3u8[^"']*)["']/) || pHtml.match(/["']([^"']+\.m3u8[^"']*)["']/);
+    for (const candidateUrl of playerCandidates) {
+      try {
+        const pRes = await fetch(candidateUrl, { headers: playerHeaders, cache: "no-store" });
+        console.info("[Linkkf] player candidate", {
+          host: (() => { try { return new URL(candidateUrl).host; } catch { return "invalid"; } })(),
+          status: pRes.status,
+        });
 
-    if (m3u8Match) {
-      const rawM3u8 = m3u8Match[1].trim();
-      if (rawM3u8.startsWith("//")) {
-        const parsed = new URL(actualPlayerUrl);
-        m3u8Url = `${parsed.protocol}${rawM3u8}`;
-      } else {
-        m3u8Url = new URL(rawM3u8, actualPlayerUrl).toString();
+        if (!pRes.ok) continue;
+
+        const pHtml = await pRes.text();
+        const mediaCookie = typeof pRes.headers.getSetCookie === "function"
+          ? pRes.headers.getSetCookie().map((v) => v.split(";")[0]).join("; ")
+          : (pRes.headers.get("set-cookie") || "").split(/,(?=[^;]+=[^;]+)/).map((v) => v.split(";")[0].trim()).filter(Boolean).join("; ");
+
+        let m3u8Url = "";
+        const m3u8Match =
+          pHtml.match(/(?:url|videoUrl)\s*:\s*["']([^"']+\.m3u8[^"']*)["']/) ||
+          pHtml.match(/["']([^"']+\.m3u8[^"']*)["']/);
+
+        if (m3u8Match) {
+          const rawM3u8 = m3u8Match[1].trim();
+          if (rawM3u8.startsWith("//")) {
+            const parsed = new URL(candidateUrl);
+            m3u8Url = `${parsed.protocol}${rawM3u8}`;
+          } else {
+            m3u8Url = new URL(rawM3u8, candidateUrl).toString();
+          }
+        }
+
+        if (!m3u8Url) {
+          console.info("[Linkkf] player candidate has no m3u8");
+          continue;
+        }
+
+        // 플레이어가 알려준 m3u8이 실제로 서버에서 접근 가능한지 확인한다.
+        const m3u8Origin = new URL(m3u8Url).origin;
+        const probeHeaders = {
+          "User-Agent": LINKKF_HEADERS["User-Agent"],
+          Referer: candidateUrl,
+          Origin: m3u8Origin,
+          Accept: "*/*",
+          "Accept-Language": LINKKF_HEADERS["Accept-Language"],
+          ...(mediaCookie ? { Cookie: mediaCookie } : {}),
+        };
+        const probe = await fetch(m3u8Url, { headers: probeHeaders, cache: "no-store" });
+        console.info("[Linkkf] m3u8 probe", {
+          host: (() => { try { return new URL(m3u8Url).host; } catch { return "invalid"; } })(),
+          status: probe.status,
+        });
+
+        if (!probe.ok) continue;
+
+        let vttUrl = "";
+        const vttMatch =
+          pHtml.match(/["']file["']\s*:\s*["']([^"']+\.vtt[^"']*)["']/) ||
+          pHtml.match(/["']([^"']+\.vtt[^"']*)["']/);
+        if (vttMatch) {
+          const rawVtt = vttMatch[1].trim();
+          if (rawVtt.startsWith("//")) {
+            const parsed = new URL(candidateUrl);
+            vttUrl = `${parsed.protocol}${rawVtt}`;
+          } else {
+            vttUrl = new URL(rawVtt, candidateUrl).toString();
+          }
+        }
+
+        const linkNext = (playerData.link_next as string) || "";
+        const linkPre = (playerData.link_pre as string) || "";
+
+        const result: EpisodeStreamInfo = {
+          success: true,
+          m3u8_url: m3u8Url,
+          vtt_url: vttUrl,
+          player_url: candidateUrl,
+          media_cookie: mediaCookie || undefined,
+          server_sources: serverSources,
+          link_next: linkNext.startsWith("/") ? `${BASE_URL}${linkNext}` : linkNext,
+          link_pre: linkPre.startsWith("/") ? `${BASE_URL}${linkPre}` : linkPre,
+          vod_data: (playerData.vod_data as Record<string, unknown>) || {},
+        };
+
+        streamCache[watchUrl] = { data: result, timestamp: Date.now() };
+        return result;
+      } catch (candidateError) {
+        console.error("[Linkkf] player candidate error:", candidateError);
       }
     }
 
-    let vttUrl = "";
-    const vttMatch = pHtml.match(/["']file["']\s*:\s*["']([^"']+\.vtt[^"']*)["']/) || pHtml.match(/["']([^"']+\.vtt[^"']*)["']/);
-    if (vttMatch) {
-      const rawVtt = vttMatch[1].trim();
-      if (rawVtt.startsWith("//")) {
-        const parsed = new URL(actualPlayerUrl);
-        vttUrl = `${parsed.protocol}${rawVtt}`;
-      } else {
-        vttUrl = new URL(rawVtt, actualPlayerUrl).toString();
-      }
-    }
-
-    const linkNext = (playerData.link_next as string) || "";
-    const linkPre = (playerData.link_pre as string) || "";
-
-    const result: EpisodeStreamInfo = {
-      success: true,
-      m3u8_url: m3u8Url,
-      vtt_url: vttUrl,
-      player_url: actualPlayerUrl,
-      media_cookie: mediaCookie || undefined,
-      server_sources: serverSources,
-      link_next: linkNext.startsWith("/") ? `${BASE_URL}${linkNext}` : linkNext,
-      link_pre: linkPre.startsWith("/") ? `${BASE_URL}${linkPre}` : linkPre,
-      vod_data: (playerData.vod_data as Record<string, unknown>) || {},
-    };
-
-    if (m3u8Url) {
-      streamCache[watchUrl] = { data: result, timestamp: Date.now() };
-    }
-
-    return result;
+    return lastResult;
   } catch (error) {
     console.error("[Linkkf] getEpisodeStream error:", error);
     return null;
